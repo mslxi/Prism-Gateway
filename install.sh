@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # ==========================================
-# Prism Agent 安装脚本 (Multi-Instance Support)
+# Prism Agent 一键安装脚本 (Auto-Update Version)
+# 仓库: https://github.com/mslxi/Prism-Gateway
 # ==========================================
 
 set -e
@@ -10,70 +11,102 @@ REPO="mslxi/Prism-Gateway"
 BINARY_NAME="prism-agent"
 INSTALL_DIR="/usr/local/bin"
 
-# 颜色
+# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
+# --- 1. 检查 Root 权限 ---
 if [ "$EUID" -ne 0 ]; then
-  error "请使用 sudo 运行"
+  error "请使用 sudo 运行此脚本"
 fi
 
-# --- 参数解析 ---
+# --- 2. 参数解析 ---
 MASTER_ADDR=""
 SECRET_TOKEN=""
-SERVICE_NAME="prism-agent" # 默认服务名
+SERVICE_NAME="prism-agent"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --master) MASTER_ADDR="$2"; shift 2 ;;
     --secret) SECRET_TOKEN="$2"; shift 2 ;;
-    --name)   SERVICE_NAME="$2"; shift 2 ;; # 支持自定义服务名
+    --name)   SERVICE_NAME="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 
 if [ -z "$MASTER_ADDR" ] || [ -z "$SECRET_TOKEN" ]; then
-    error "必须提供参数: --master 和 --secret\n可选参数: --name (用于同机部署多个Agent)"
+    error "参数缺失！\n用法: curl ... | bash -s -- --master http://IP:8080 --secret YOUR_TOKEN"
 fi
 
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-info "准备部署服务: $SERVICE_NAME"
-
-# --- 架构检测 ---
+# --- 3. 自动探测架构 ---
 ARCH=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-case "$ARCH" in
-  x86_64) ARCH_SUFFIX="amd64" ;;
-  aarch64|arm64) ARCH_SUFFIX="arm64" ;;
-  *) error "不支持架构: $ARCH" ;;
-esac
-ASSET_NAME="${BINARY_NAME}_${OS}_${ARCH_SUFFIX}"
 
-# --- 下载二进制 (如果是第一次安装或强制更新) ---
-# 只要二进制文件存在，我们就假设它是可用的。
-# 如果需要强制更新，用户可以手动删掉 /usr/local/bin/prism-agent
-if [ ! -f "$INSTALL_DIR/$BINARY_NAME" ]; then
-    info "正在从 GitHub 下载最新版本..."
-    DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep "browser_download_url" | grep "$ASSET_NAME" | cut -d '"' -f 4)
-    
-    if [ -z "$DOWNLOAD_URL" ]; then
-        # Fallback
-        DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
-    fi
-    
-    curl -L -o "/tmp/$BINARY_NAME" "$DOWNLOAD_URL" --progress-bar
-    chmod +x "/tmp/$BINARY_NAME"
-    mv "/tmp/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
+case "$ARCH" in
+  x86_64)
+    ARCH_SUFFIX="amd64"
+    ;;
+  aarch64|arm64)
+    ARCH_SUFFIX="arm64"
+    ;;
+  *)
+    error "不支持的系统架构: $ARCH"
+    ;;
+esac
+
+ASSET_NAME="${BINARY_NAME}_${OS}_${ARCH_SUFFIX}"
+info "检测到系统环境: ${CYAN}${OS}/${ARCH_SUFFIX}${NC}"
+
+# --- 4. 获取最新版本号 (新增逻辑) ---
+info "正在检查 GitHub 最新版本..."
+
+# 请求 GitHub API
+LATEST_RESP=$(curl -s "https://api.github.com/repos/$REPO/releases/latest")
+
+# 尝试提取 tag_name (例如 v1.0.20240101)
+# grep 匹配 "tag_name": "..." 然后 cut 提取引号中间的内容
+VERSION=$(echo "$LATEST_RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+
+# 尝试提取下载链接
+DOWNLOAD_URL=$(echo "$LATEST_RESP" | grep "browser_download_url" | grep "$ASSET_NAME" | head -n 1 | cut -d '"' -f 4)
+
+if [ -n "$VERSION" ]; then
+    info "发现最新版本: ${CYAN}${VERSION}${NC}"
 else
-    info "二进制文件已存在，跳过下载..."
+    warn "无法获取版本号 (可能受限于 GitHub API 速率)，尝试使用 latest 链接盲装..."
 fi
 
-# --- 配置 Systemd (支持多实例) ---
-info "配置 Systemd: $SERVICE_FILE"
+# 如果 API 没拿到链接，使用固定的 latest 结构进行回退
+if [ -z "$DOWNLOAD_URL" ]; then
+    DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
+fi
+
+# --- 5. 下载与更新 ---
+# 逻辑：总是下载最新版覆盖，确保版本一致性
+info "准备下载: $DOWNLOAD_URL"
+curl -L -o "/tmp/$BINARY_NAME" "$DOWNLOAD_URL" --progress-bar
+
+if [ ! -f "/tmp/$BINARY_NAME" ]; then
+    error "下载失败，文件 /tmp/$BINARY_NAME 不存在，请检查网络或文件名。"
+fi
+
+# 安装
+chmod +x "/tmp/$BINARY_NAME"
+# 停止旧服务(如果存在)以释放文件锁
+systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+mv "/tmp/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
+info "二进制文件已安装到: $INSTALL_DIR/$BINARY_NAME"
+
+# --- 6. 配置 Systemd ---
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+info "更新服务配置: $SERVICE_FILE"
 
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -85,7 +118,7 @@ Type=simple
 User=root
 Restart=always
 RestartSec=5s
-# 关键：指向同一个二进制文件，但使用不同的参数
+# 强制复写启动参数
 ExecStart=$INSTALL_DIR/$BINARY_NAME --master "$MASTER_ADDR" --secret "$SECRET_TOKEN"
 LimitNOFILE=65535
 
@@ -93,50 +126,26 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-# --- 启动 ---
+# --- 7. 启动服务 ---
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
+# --- 8. 状态检查与提示 ---
 sleep 2
 if systemctl is-active --quiet "$SERVICE_NAME"; then
-    info "✅ 安装成功! 服务名: $SERVICE_NAME"
-    info "日志: journalctl -u $SERVICE_NAME -f"
-else
-    error "启动失败，请检查日志"
-fi
-
-# --- 8. 启动服务 ---
-info "重载并启动服务..."
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME"
-systemctl restart "$SERVICE_NAME"
-
-# --- 9. 验证状态与后续引导 ---
-sleep 2
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-    info "✅ 安装成功! 服务名: $SERVICE_NAME"
-    
-    # 智能提示：检测是否为 DNS 节点
-    # 我们简单通过日志 grep 一下，或者提示用户
+    echo ""
+    info "✅ 安装成功！服务 [${CYAN}$SERVICE_NAME${NC}] 已启动。"
+    info "当前版本: ${VERSION:-Unknown}"
     echo ""
     echo "---------------------------------------------------"
-    echo "🛑 后续步骤 (针对 DNS 节点):"
-    echo "---------------------------------------------------"
-    echo "Agent 已经启动，但为了让本机流量生效，您需要修改系统 DNS。"
-    echo ""
-    echo "👉 1. 测试 Agent 是否正常工作:"
-    echo "   dig @127.0.0.1 google.com"
-    echo "   (如果返回 IP，说明 Agent 正常)"
-    echo ""
-    echo "👉 2. 全局生效 (修改 /etc/resolv.conf):"
+    echo "🛑 [DNS 节点提示]"
+    echo "如果这是 DNS 节点，请修改系统 DNS 指向本机:"
     echo "   sudo sed -i 's/^nameserver.*/nameserver 127.0.0.1/' /etc/resolv.conf"
-    echo "   (注意：某些云厂商会自动重置此文件，请使用 chattr +i 锁定或修改 netplan)"
     echo ""
-    echo "🔍 查看实时日志:"
+    echo "🔍 [日志查看]"
     echo "   journalctl -u $SERVICE_NAME -f"
     echo "---------------------------------------------------"
-
 else
-    error "❌ 服务启动失败，请检查日志: systemctl status $SERVICE_NAME"
+    error "服务启动失败，请运行: systemctl status $SERVICE_NAME"
 fi
