@@ -12,6 +12,7 @@ REPO="mslxi/Prism-Gateway"
 BINARY_NAME="prism-agent"
 INSTALL_DIR="/usr/local/bin"
 SERVICE_NAME="prism-agent"
+SCRIPT_URL="https://raw.githubusercontent.com/mslxi/Prism-Gateway/refs/heads/main/install.sh"
 
 # --- 颜色定义 ---
 RED='\033[0;31m'
@@ -38,15 +39,22 @@ check_root() {
 parse_args() {
     MASTER_ADDR=""
     SECRET_TOKEN=""
+    UNINSTALL_MODE=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
             --master) MASTER_ADDR="$2"; shift 2 ;;
             --secret) SECRET_TOKEN="$2"; shift 2 ;;
             --name)   SERVICE_NAME="$2"; shift 2 ;;
+            --uninstall) UNINSTALL_MODE=true; shift ;;
             *) shift ;;
         esac
     done
+
+    # 如果是卸载模式，跳过参数检查
+    if [ "$UNINSTALL_MODE" = true ]; then
+        return
+    fi
 
     if [ -z "$MASTER_ADDR" ] || [ -z "$SECRET_TOKEN" ]; then
         echo -e "${YELLOW}参数缺失！${NC}"
@@ -55,7 +63,41 @@ parse_args() {
     fi
 }
 
-# 3. 系统探测
+# 3. 卸载逻辑
+uninstall_prism() {
+    step "正在卸载 Prism Agent ($SERVICE_NAME)..."
+
+    # 停止服务
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        info "停止服务..."
+        systemctl stop "$SERVICE_NAME"
+    fi
+
+    # 禁用服务
+    if systemctl is-enabled --quiet "$SERVICE_NAME"; then
+        info "禁用开机自启..."
+        systemctl disable "$SERVICE_NAME"
+    fi
+
+    # 删除服务文件
+    if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
+        info "移除服务文件..."
+        rm "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+    fi
+
+    # 删除二进制文件
+    if [ -f "$INSTALL_DIR/$BINARY_NAME" ]; then
+        info "移除二进制文件..."
+        rm "$INSTALL_DIR/$BINARY_NAME"
+    fi
+
+    echo ""
+    info "✅ 卸载完成！相关文件已清理。"
+    exit 0
+}
+
+# 4. 系统探测
 detect_system() {
     ARCH=$(uname -m)
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -70,7 +112,7 @@ detect_system() {
     info "环境检测: ${OS} / ${ARCH_SUFFIX}"
 }
 
-# 4. 下载二进制文件
+# 5. 下载二进制文件
 download_binary() {
     step "正在获取版本信息..."
     
@@ -109,7 +151,7 @@ download_binary() {
     info "安装路径: $INSTALL_DIR/$BINARY_NAME"
 }
 
-# 5. 配置 Systemd 服务
+# 6. 配置 Systemd 服务
 configure_service() {
     step "配置系统服务..."
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -136,7 +178,7 @@ EOF
     info "服务已配置并设置开机自启"
 }
 
-# 6. 启动服务
+# 7. 启动服务
 start_service() {
     step "启动服务..."
     systemctl restart "$SERVICE_NAME"
@@ -150,7 +192,7 @@ start_service() {
     fi
 }
 
-# 7. 智能日志分析与提示 (核心新功能)
+# 8. 智能日志分析与提示 (核心新功能)
 analyze_mode_and_prompt() {
     step "分析节点运行模式..."
     
@@ -189,12 +231,25 @@ analyze_mode_and_prompt() {
         echo "   journalctl -u $SERVICE_NAME -f"
     fi
     echo "---------------------------------------------------"
+    echo ""
+    echo -e "🗑️  如需卸载，请运行以下命令:"
+    echo -e "   ${GREEN}curl -sL $SCRIPT_URL | sudo bash -s -- --uninstall${NC}"
+    if [ "$SERVICE_NAME" != "prism-agent" ]; then
+        echo -e "   (自定义服务名需添加: ${GREEN}--name $SERVICE_NAME${NC})"
+    fi
+    echo ""
 }
 
 # --- 主程序流程 ---
 main() {
     check_root
     parse_args "$@"
+    
+    # 优先处理卸载逻辑
+    if [ "$UNINSTALL_MODE" = true ]; then
+        uninstall_prism
+    fi
+
     detect_system
     download_binary
     configure_service
