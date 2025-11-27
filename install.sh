@@ -210,7 +210,7 @@ analyze_mode_and_prompt() {
         echo -e "🌐 检测到模式: ${CYAN}DNS Client (接入端)${NC}"
         echo ""
         echo -e "${YELLOW}👉 [必须执行] 请修改系统 DNS 指向本机:${NC}"
-        echo -e "   临时生效: ${GREEN}sudo echo 'nameserver 127.0.0.1' > /etc/resolv.conf${NC}"
+        echo -e "   临时生效: ${GREEN} echo 'nameserver 127.0.0.1' > /etc/resolv.conf${NC}"
         echo -e "   (建议根据您的 Linux 发行版配置永久 DNS)"
         echo ""
         echo "   此节点将作为局域网或其他设备的 DNS 网关。"
@@ -233,7 +233,7 @@ analyze_mode_and_prompt() {
     echo "---------------------------------------------------"
     echo ""
     echo -e "🗑️  如需卸载，请运行以下命令:"
-    echo -e "   ${GREEN}curl -sL $SCRIPT_URL | sudo bash -s -- --uninstall${NC}"
+    echo -e "   ${GREEN}curl -sL $SCRIPT_URL | bash -s -- --uninstall${NC}"
     if [ "$SERVICE_NAME" != "prism-agent" ]; then
         echo -e "   (自定义服务名需添加: ${GREEN}--name $SERVICE_NAME${NC})"
     fi
