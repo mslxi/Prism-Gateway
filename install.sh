@@ -3,6 +3,7 @@
 # ==========================================
 # Prism Agent 一键安装脚本 (Smart Log Analysis)
 # 仓库: https://github.com/mslxi/Prism-Gateway
+# 更新: 支持 --uninstall 卸载 和 --beta 预览版安装
 # ==========================================
 
 set -e
@@ -40,6 +41,7 @@ parse_args() {
     MASTER_ADDR=""
     SECRET_TOKEN=""
     UNINSTALL_MODE=false
+    BETA_MODE=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -47,18 +49,19 @@ parse_args() {
             --secret) SECRET_TOKEN="$2"; shift 2 ;;
             --name)   SERVICE_NAME="$2"; shift 2 ;;
             --uninstall) UNINSTALL_MODE=true; shift ;;
+            --beta)   BETA_MODE=true; shift ;;
             *) shift ;;
         esac
     done
 
-    # 如果是卸载模式，跳过参数检查
+    # 卸载模式跳过检查
     if [ "$UNINSTALL_MODE" = true ]; then
         return
     fi
 
     if [ -z "$MASTER_ADDR" ] || [ -z "$SECRET_TOKEN" ]; then
         echo -e "${YELLOW}参数缺失！${NC}"
-        echo -e "用法: curl ... | bash -s -- --master http://IP:8080 --secret YOUR_TOKEN [--name my-agent]"
+        echo -e "用法: ... | bash -s -- --master URL --secret TOKEN [--beta]"
         exit 1
     fi
 }
@@ -66,34 +69,20 @@ parse_args() {
 # 3. 卸载逻辑
 uninstall_prism() {
     step "正在卸载 Prism Agent ($SERVICE_NAME)..."
-
-    # 停止服务
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        info "停止服务..."
-        systemctl stop "$SERVICE_NAME"
-    fi
-
-    # 禁用服务
-    if systemctl is-enabled --quiet "$SERVICE_NAME"; then
-        info "禁用开机自启..."
-        systemctl disable "$SERVICE_NAME"
-    fi
-
-    # 删除服务文件
+    
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+    
     if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
-        info "移除服务文件..."
         rm "/etc/systemd/system/${SERVICE_NAME}.service"
         systemctl daemon-reload
     fi
-
-    # 删除二进制文件
+    
     if [ -f "$INSTALL_DIR/$BINARY_NAME" ]; then
-        info "移除二进制文件..."
         rm "$INSTALL_DIR/$BINARY_NAME"
     fi
-
-    echo ""
-    info "✅ 卸载完成！相关文件已清理。"
+    
+    info "✅ 卸载完成。"
     exit 0
 }
 
@@ -112,23 +101,40 @@ detect_system() {
     info "环境检测: ${OS} / ${ARCH_SUFFIX}"
 }
 
-# 5. 下载二进制文件
+# 5. 下载二进制文件 (核心修改部分)
 download_binary() {
     step "正在获取版本信息..."
+
+    # 确定 API 地址
+    if [ "$BETA_MODE" = true ]; then
+        # Beta 模式：获取所有 Release 列表（第一个即为最新，包含 Pre-release）
+        API_URL="https://api.github.com/repos/$REPO/releases"
+        info "模式: ${YELLOW}Beta Channel (Pre-release)${NC}"
+    else
+        # 默认模式：仅获取 Latest Stable
+        API_URL="https://api.github.com/repos/$REPO/releases/latest"
+        info "模式: ${GREEN}Stable Channel (Official)${NC}"
+    fi
     
-    # 尝试通过 GitHub API 获取最新版
-    LATEST_RESP=$(curl -s --connect-timeout 5 "https://api.github.com/repos/$REPO/releases/latest")
-    VERSION=$(echo "$LATEST_RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
-    DOWNLOAD_URL=$(echo "$LATEST_RESP" | grep "browser_download_url" | grep "$ASSET_NAME" | head -n 1 | cut -d '"' -f 4)
+    # 获取版本信息
+    RESP=$(curl -s --connect-timeout 5 "$API_URL")
+
+    # 解析 Tag 和 下载链接
+    # 注意：如果是 List (Beta模式)，grep 依然会匹配到第一项（最新项）
+    VERSION=$(echo "$RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+    DOWNLOAD_URL=$(echo "$RESP" | grep "browser_download_url" | grep "$ASSET_NAME" | head -n 1 | cut -d '"' -f 4)
 
     if [ -n "$VERSION" ]; then
-        info "目标版本: ${CYAN}${VERSION}${NC}"
+        info "发现版本: ${CYAN}${VERSION}${NC}"
     else
-        warn "无法获取版本号，尝试使用 latest 通用链接..."
+        warn "无法通过 API 获取版本信息，尝试使用通用链接..."
     fi
 
-    # 回退链接
+    # 回退策略
     if [ -z "$DOWNLOAD_URL" ]; then
+        if [ "$BETA_MODE" = true ]; then
+            warn "Beta 版本获取失败，回退到最新稳定版 (Latest Stable)..."
+        fi
         DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
     fi
 
@@ -136,22 +142,21 @@ download_binary() {
     curl -L -o "/tmp/$BINARY_NAME" "$DOWNLOAD_URL" --progress-bar
 
     if [ ! -f "/tmp/$BINARY_NAME" ]; then
-        error "下载失败，请检查网络连接。"
+        error "下载失败，请检查网络或 GitHub 访问。"
     fi
 
     chmod +x "/tmp/$BINARY_NAME"
     
-    # 尝试停止服务以释放文件锁
+    # 停止旧服务
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         info "停止旧服务..."
         systemctl stop "$SERVICE_NAME"
     fi
 
     mv "/tmp/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-    info "安装路径: $INSTALL_DIR/$BINARY_NAME"
 }
 
-# 6. 配置 Systemd 服务
+# 6. 配置服务
 configure_service() {
     step "配置系统服务..."
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -175,77 +180,50 @@ EOF
 
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
-    info "服务已配置并设置开机自启"
 }
 
-# 7. 启动服务
+# 7. 启动与检测
 start_service() {
     step "启动服务..."
     systemctl restart "$SERVICE_NAME"
     
-    # 等待服务初始化并产生日志
-    info "等待 Agent 初始化 (5秒)..."
-    sleep 5
+    info "等待初始化..."
+    sleep 3
 
     if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-        error "服务启动失败！请检查日志: journalctl -u $SERVICE_NAME -n 20"
+        error "启动失败！请查看日志: journalctl -u $SERVICE_NAME -n 20"
     fi
 }
 
-# 8. 智能日志分析与提示 (核心新功能)
 analyze_mode_and_prompt() {
-    step "分析节点运行模式..."
-    
-    # 读取最近的日志
     LOGS=$(journalctl -u "$SERVICE_NAME" -n 50 --no-pager)
-
     echo ""
     echo "---------------------------------------------------"
-    info "✅ 安装成功！服务 [${CYAN}$SERVICE_NAME${NC}] 正在运行。"
-    echo "---------------------------------------------------"
-
-    # 匹配 Go 代码中的日志关键词
-    if echo "$LOGS" | grep -q "DNS Mode Started"; then
-        # --- DNS 模式提示 ---
-        echo -e "🌐 检测到模式: ${CYAN}DNS Client (接入端)${NC}"
-        echo ""
-        echo -e "${YELLOW}👉 [必须执行] 请修改系统 DNS 指向本机:${NC}"
-        echo -e "   临时生效: ${GREEN} echo 'nameserver 127.0.0.1' > /etc/resolv.conf${NC}"
-        echo -e "   (建议根据您的 Linux 发行版配置永久 DNS)"
-        echo ""
-        echo "   此节点将作为局域网或其他设备的 DNS 网关。"
-
-    elif echo "$LOGS" | grep -q "Proxy Mode Started"; then
-        # --- Proxy 模式提示 ---
-        echo -e "🚀 检测到模式: ${CYAN}Proxy Node (出口端)${NC}"
-        echo ""
-        echo -e "${YELLOW}👉 [注意事项] 请确保防火墙放行端口:${NC}"
-        echo -e "   TCP: ${GREEN}80, 443${NC}"
-        echo ""
-        echo "   该节点现已准备好接收并转发流量。"
+    info "✅ 安装成功！[$SERVICE_NAME] 正在运行。"
     
-    else
-        # --- 未知/等待中 ---
-        warn "暂未检测到明确的模式日志 (可能正在同步配置或端口被占用)。"
-        echo "请稍后通过以下命令查看详细状态:"
-        echo "   journalctl -u $SERVICE_NAME -f"
+    if [ "$BETA_MODE" = true ]; then
+        echo -e "⚠️  当前为 ${YELLOW}Beta 测试版${NC}，如遇 Bug 请反馈。"
     fi
     echo "---------------------------------------------------"
-    echo ""
-    echo -e "🗑️  如需卸载，请运行以下命令:"
-    echo -e "   ${GREEN}curl -sL $SCRIPT_URL | bash -s -- --uninstall${NC}"
-    if [ "$SERVICE_NAME" != "prism-agent" ]; then
-        echo -e "   (自定义服务名需添加: ${GREEN}--name $SERVICE_NAME${NC})"
+
+    if echo "$LOGS" | grep -q "DNS Mode Started"; then
+        echo -e "🌐 模式: ${CYAN}DNS Client${NC} (请设置 DNS 为 127.0.0.1)"
+    elif echo "$LOGS" | grep -q "Proxy Mode Started"; then
+        echo -e "🚀 模式: ${CYAN}Proxy Node${NC} (请放行 80/443 端口)"
+    else
+        warn "正在同步配置，请稍后查看日志。"
     fi
+    
+    echo ""
+    echo -e "🗑️  卸载命令: ${GREEN}curl -sL $SCRIPT_URL | sudo bash -s -- --uninstall${NC}"
     echo ""
 }
 
-# --- 主程序流程 ---
+# --- 主程序 ---
 main() {
     check_root
     parse_args "$@"
     
-    # 优先处理卸载逻辑
     if [ "$UNINSTALL_MODE" = true ]; then
         uninstall_prism
     fi
@@ -257,5 +235,4 @@ main() {
     analyze_mode_and_prompt
 }
 
-# 执行主程序
 main "$@"
