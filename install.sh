@@ -102,40 +102,57 @@ detect_system() {
 }
 
 # 5. 下载二进制文件 (核心修改部分)
+# 5. 下载二进制文件 (修复版)
 download_binary() {
     step "正在获取版本信息..."
-
-    # 确定 API 地址
-    if [ "$BETA_MODE" = true ]; then
-        # Beta 模式：获取所有 Release 列表（第一个即为最新，包含 Pre-release）
-        API_URL="https://api.github.com/repos/$REPO/releases"
-        info "模式: ${YELLOW}Beta Channel (Pre-release)${NC}"
-    else
-        # 默认模式：仅获取 Latest Stable
-        API_URL="https://api.github.com/repos/$REPO/releases/latest"
-        info "模式: ${GREEN}Stable Channel (Official)${NC}"
-    fi
     
-    # 获取版本信息
-    RESP=$(curl -s --connect-timeout 5 "$API_URL")
+    TARGET_TAG=""
+    TAG_RESP=""
 
-    # 解析 Tag 和 下载链接
-    # 注意：如果是 List (Beta模式)，grep 依然会匹配到第一项（最新项）
-    VERSION=$(echo "$RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
-    DOWNLOAD_URL=$(echo "$RESP" | grep "browser_download_url" | grep "$ASSET_NAME" | head -n 1 | cut -d '"' -f 4)
+    # --- 阶段一：确定目标 Tag ---
+    if [ "$BETA_MODE" = true ]; then
+        info "模式: ${YELLOW}Beta Channel (搜索预览版)${NC}"
+        # 1. 获取列表
+        LIST_RESP=$(curl -s --connect-timeout 5 "https://api.github.com/repos/$REPO/releases")
+        
+        # 2. 筛选 Tag：在列表中查找包含 'beta' 的最新 Tag
+        # 说明: grep '"tag_name":' 找出所有tag -> grep -i "beta" 筛选beta版 -> head -n 1 取最新的
+        TARGET_TAG=$(echo "$LIST_RESP" | grep '"tag_name":' | cut -d '"' -f 4 | grep -i "beta" | head -n 1)
 
-    if [ -n "$VERSION" ]; then
-        info "发现版本: ${CYAN}${VERSION}${NC}"
+        if [ -z "$TARGET_TAG" ]; then
+            warn "未检测到带有 'beta' 标识的版本，将尝试使用最新发布的版本..."
+            # 回退：取列表第一个版本
+            TARGET_TAG=$(echo "$LIST_RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+        fi
+        
+        # 3. 获取该 Tag 的详细信息 (关键步骤：确保下载链接属于该 Tag)
+        if [ -n "$TARGET_TAG" ]; then
+            info "锁定版本: ${CYAN}${TARGET_TAG}${NC}"
+            TAG_RESP=$(curl -s --connect-timeout 5 "https://api.github.com/repos/$REPO/releases/tags/$TARGET_TAG")
+        fi
+        
     else
-        warn "无法通过 API 获取版本信息，尝试使用通用链接..."
+        info "模式: ${GREEN}Stable Channel (正式版)${NC}"
+        # 默认模式：直接获取 Latest 详情
+        TAG_RESP=$(curl -s --connect-timeout 5 "https://api.github.com/repos/$REPO/releases/latest")
+        TARGET_TAG=$(echo "$TAG_RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+        info "发现版本: ${CYAN}${TARGET_TAG}${NC}"
     fi
 
-    # 回退策略
+    # --- 阶段二：提取下载链接 ---
+    # 此时 TAG_RESP 仅包含单一版本的 JSON，grep 不会错位
+    DOWNLOAD_URL=$(echo "$TAG_RESP" | grep "browser_download_url" | grep "$ASSET_NAME" | head -n 1 | cut -d '"' -f 4)
+
+    # 回退策略 (如果 API 提取失败)
     if [ -z "$DOWNLOAD_URL" ]; then
-        if [ "$BETA_MODE" = true ]; then
-            warn "Beta 版本获取失败，回退到最新稳定版 (Latest Stable)..."
+        warn "API 解析失败，尝试构建通用下载链接..."
+        if [ "$BETA_MODE" = true ] && [ -n "$TARGET_TAG" ]; then
+             # Beta 模式下，使用 Tag 拼接链接
+             DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TARGET_TAG/$ASSET_NAME"
+        else
+             # 默认回退到 latest
+             DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
         fi
-        DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
     fi
 
     info "下载地址: $DOWNLOAD_URL"
