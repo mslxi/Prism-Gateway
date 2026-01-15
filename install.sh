@@ -1,186 +1,126 @@
 #!/bin/bash
 
 # ==========================================
-# Prism Agent 一键安装脚本 (Smart Log Analysis)
+# Prism Agent 一键安装脚本
 # 仓库: https://github.com/mslxi/Prism-Gateway
-# 更新: 支持 --uninstall 卸载 和 --beta 预览版安装
 # ==========================================
 
-set -e
+set -e # 遇到错误立即退出
 
-# --- 全局配置 ---
+# --- 1. 全局变量与配置 ---
 REPO="mslxi/Prism-Gateway"
 BINARY_NAME="prism-agent"
 INSTALL_DIR="/usr/local/bin"
-SERVICE_NAME="prism-agent"
-SCRIPT_URL="https://raw.githubusercontent.com/mslxi/Prism-Gateway/refs/heads/main/install.sh"
+SERVICE_FILE="/etc/systemd/system/prism-agent.service"
 
-# --- 颜色定义 ---
+# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
-# --- 辅助函数 ---
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 
-# 1. 权限检查
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        error "请使用 sudo 或 root 权限运行此脚本"
-    fi
-}
+# --- 2. 检查 Root 权限 ---
+if [ "$EUID" -ne 0 ]; then
+  error "请使用 root 权限运行此脚本 (sudo bash install.sh ...)"
+fi
 
-# 2. 参数解析
-parse_args() {
-    MASTER_ADDR=""
-    SECRET_TOKEN=""
-    UNINSTALL_MODE=false
-    BETA_MODE=false
+# --- 3. 参数解析 (--master, --secret, --smart) ---
+MASTER_ADDR=""
+SECRET_TOKEN=""
+ENABLE_SMART=""
 
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --master) MASTER_ADDR="$2"; shift 2 ;;
-            --secret) SECRET_TOKEN="$2"; shift 2 ;;
-            --name)   SERVICE_NAME="$2"; shift 2 ;;
-            --uninstall) UNINSTALL_MODE=true; shift ;;
-            --beta)   BETA_MODE=true; shift ;;
-            *) shift ;;
-        esac
-    done
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --master)
+      MASTER_ADDR="$2"
+      shift 2
+      ;;
+    --secret)
+      SECRET_TOKEN="$2"
+      shift 2
+      ;;
+    --smart)
+      ENABLE_SMART="true"
+      shift 1 # --smart 是开关参数，不需要吃掉下一个值
+      ;;
+    *)
+      shift # 忽略未知参数
+      ;;
+  esac
+done
 
-    # 卸载模式跳过检查
-    if [ "$UNINSTALL_MODE" = true ]; then
-        return
-    fi
+if [ -z "$MASTER_ADDR" ] || [ -z "$SECRET_TOKEN" ]; then
+    error "必须提供 --master 和 --secret 参数。\n示例: curl -sL ... | bash -s -- --master http://1.2.3.4:8080 --secret mytoken [--smart]"
+fi
 
-    if [ -z "$MASTER_ADDR" ] || [ -z "$SECRET_TOKEN" ]; then
-        echo -e "${YELLOW}参数缺失！${NC}"
-        echo -e "用法: ... | bash -s -- --master URL --secret TOKEN [--beta]"
-        exit 1
-    fi
-}
+# 构建启动参数
+AGENT_ARGS="--master \"$MASTER_ADDR\" --secret \"$SECRET_TOKEN\""
+if [ -n "$ENABLE_SMART" ]; then
+    AGENT_ARGS="$AGENT_ARGS --smart"
+    info "🌟 已启用 Smart Mode (智能区域解锁)"
+fi
 
-# 3. 卸载逻辑
-uninstall_prism() {
-    step "正在卸载 Prism Agent ($SERVICE_NAME)..."
-    
-    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-    
-    if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
-        rm "/etc/systemd/system/${SERVICE_NAME}.service"
-        systemctl daemon-reload
-    fi
-    
-    if [ -f "$INSTALL_DIR/$BINARY_NAME" ]; then
-        rm "$INSTALL_DIR/$BINARY_NAME"
-    fi
-    
-    info "✅ 卸载完成。"
-    exit 0
-}
+# --- 4. 自动探测系统架构 ---
+ARCH=$(uname -m)
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
-# 4. 系统探测
-detect_system() {
-    ARCH=$(uname -m)
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$ARCH" in
+  x86_64)
+    ARCH_SUFFIX="amd64"
+    ;;
+  aarch64|arm64)
+    ARCH_SUFFIX="arm64"
+    ;;
+  *)
+    error "不支持的架构: $ARCH"
+    ;;
+esac
 
-    case "$ARCH" in
-        x86_64) ARCH_SUFFIX="amd64" ;;
-        aarch64|arm64) ARCH_SUFFIX="arm64" ;;
-        *) error "不支持的系统架构: $ARCH" ;;
-    esac
+# 假设您的 Release 文件命名格式为: prism-agent_linux_amd64
+ASSET_NAME="${BINARY_NAME}_${OS}_${ARCH_SUFFIX}"
 
-    ASSET_NAME="${BINARY_NAME}_${OS}_${ARCH_SUFFIX}"
-    info "环境检测: ${OS} / ${ARCH_SUFFIX}"
-}
+info "检测到系统环境: $OS / $ARCH_SUFFIX"
 
-# 5. 下载二进制文件 (核心修改部分)
-# 5. 下载二进制文件 (修复版)
-download_binary() {
-    step "正在获取版本信息..."
-    
-    TARGET_TAG=""
-    TAG_RESP=""
+# --- 5. 获取 GitHub 最新版本 ---
+info "正在查询最新版本..."
 
-    # --- 阶段一：确定目标 Tag ---
-    if [ "$BETA_MODE" = true ]; then
-        info "模式: ${YELLOW}Beta Channel (搜索预览版)${NC}"
-        # 1. 获取列表
-        LIST_RESP=$(curl -s --connect-timeout 5 "https://api.github.com/repos/$REPO/releases")
-        
-        # 2. 筛选 Tag：在列表中查找包含 'beta' 的最新 Tag
-        # 说明: grep '"tag_name":' 找出所有tag -> grep -i "beta" 筛选beta版 -> head -n 1 取最新的
-        TARGET_TAG=$(echo "$LIST_RESP" | grep '"tag_name":' | cut -d '"' -f 4 | grep -i "beta" | head -n 1)
+# 使用 GitHub API 获取最新 release 的下载链接
+# 如果是在国内环境，可能需要考虑 API 访问问题，这里保持原逻辑
+DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | \
+  grep "browser_download_url" | \
+  grep "$ASSET_NAME" | \
+  cut -d '"' -f 4)
 
-        if [ -z "$TARGET_TAG" ]; then
-            warn "未检测到带有 'beta' 标识的版本，将尝试使用最新发布的版本..."
-            # 回退：取列表第一个版本
-            TARGET_TAG=$(echo "$LIST_RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
-        fi
-        
-        # 3. 获取该 Tag 的详细信息 (关键步骤：确保下载链接属于该 Tag)
-        if [ -n "$TARGET_TAG" ]; then
-            info "锁定版本: ${CYAN}${TARGET_TAG}${NC}"
-            TAG_RESP=$(curl -s --connect-timeout 5 "https://api.github.com/repos/$REPO/releases/tags/$TARGET_TAG")
-        fi
-        
-    else
-        info "模式: ${GREEN}Stable Channel (正式版)${NC}"
-        # 默认模式：直接获取 Latest 详情
-        TAG_RESP=$(curl -s --connect-timeout 5 "https://api.github.com/repos/$REPO/releases/latest")
-        TARGET_TAG=$(echo "$TAG_RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
-        info "发现版本: ${CYAN}${TARGET_TAG}${NC}"
-    fi
+if [ -z "$DOWNLOAD_URL" ]; then
+  # Fallback: 如果 API 限制或找不到，尝试拼接 URL (假设 latest 标签存在)
+  warn "无法通过 API 获取下载链接 (可能受限于 API 速率)，尝试直接拼接 URL..."
+  DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
+fi
 
-    # --- 阶段二：提取下载链接 ---
-    # 此时 TAG_RESP 仅包含单一版本的 JSON，grep 不会错位
-    DOWNLOAD_URL=$(echo "$TAG_RESP" | grep "browser_download_url" | grep "$ASSET_NAME" | head -n 1 | cut -d '"' -f 4)
+info "下载链接: $DOWNLOAD_URL"
 
-    # 回退策略 (如果 API 提取失败)
-    if [ -z "$DOWNLOAD_URL" ]; then
-        warn "API 解析失败，尝试构建通用下载链接..."
-        if [ "$BETA_MODE" = true ] && [ -n "$TARGET_TAG" ]; then
-             # Beta 模式下，使用 Tag 拼接链接
-             DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TARGET_TAG/$ASSET_NAME"
-        else
-             # 默认回退到 latest
-             DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
-        fi
-    fi
+# --- 6. 下载与安装 ---
+info "开始下载..."
+curl -L -o "/tmp/$BINARY_NAME" "$DOWNLOAD_URL" --progress-bar
 
-    info "下载地址: $DOWNLOAD_URL"
-    curl -L -o "/tmp/$BINARY_NAME" "$DOWNLOAD_URL" --progress-bar
+if [ ! -f "/tmp/$BINARY_NAME" ]; then
+    error "下载失败，文件不存在。"
+fi
 
-    if [ ! -f "/tmp/$BINARY_NAME" ]; then
-        error "下载失败，请检查网络或 GitHub 访问。"
-    fi
+info "安装二进制文件到 $INSTALL_DIR..."
+chmod +x "/tmp/$BINARY_NAME"
+mv "/tmp/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
 
-    chmod +x "/tmp/$BINARY_NAME"
-    
-    # 停止旧服务
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        info "停止旧服务..."
-        systemctl stop "$SERVICE_NAME"
-    fi
+# --- 7. 配置 Systemd 服务 ---
+info "配置 Systemd 服务..."
 
-    mv "/tmp/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-}
-
-# 6. 配置服务
-configure_service() {
-    step "配置系统服务..."
-    SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-
-    cat > "$SERVICE_FILE" <<EOF
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Prism Agent ($SERVICE_NAME)
+Description=Prism Agent Service
 After=network.target
 
 [Service]
@@ -188,68 +128,26 @@ Type=simple
 User=root
 Restart=always
 RestartSec=5s
-ExecStart=$INSTALL_DIR/$BINARY_NAME --master "$MASTER_ADDR" --secret "$SECRET_TOKEN"
+# 使用动态构建的参数，包含可能存在的 --smart
+ExecStart=$INSTALL_DIR/$BINARY_NAME $AGENT_ARGS
+# 增加文件描述符限制，避免高并发连接失败
 LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-}
+# --- 8. 启动服务 ---
+info "重载并启动服务..."
+systemctl daemon-reload
+systemctl enable prism-agent
+systemctl restart prism-agent
 
-# 7. 启动与检测
-start_service() {
-    step "启动服务..."
-    systemctl restart "$SERVICE_NAME"
-    
-    info "等待初始化..."
-    sleep 3
-
-    if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-        error "启动失败！请查看日志: journalctl -u $SERVICE_NAME -n 20"
-    fi
-}
-
-analyze_mode_and_prompt() {
-    LOGS=$(journalctl -u "$SERVICE_NAME" -n 50 --no-pager)
-    echo ""
-    echo "---------------------------------------------------"
-    info "✅ 安装成功！[$SERVICE_NAME] 正在运行。"
-    
-    if [ "$BETA_MODE" = true ]; then
-        echo -e "⚠️  当前为 ${YELLOW}Beta 测试版${NC}，如遇 Bug 请反馈。"
-    fi
-    echo "---------------------------------------------------"
-
-    if echo "$LOGS" | grep -q "DNS Mode Started"; then
-        echo -e "🌐 模式: ${CYAN}DNS Client${NC} (请设置 DNS 为 127.0.0.1)"
-    elif echo "$LOGS" | grep -q "Proxy Mode Started"; then
-        echo -e "🚀 模式: ${CYAN}Proxy Node${NC} (请放行 80/443 端口)"
-    else
-        warn "正在同步配置，请稍后查看日志。"
-    fi
-    
-    echo ""
-    echo -e "🗑️  卸载命令: ${GREEN}curl -sL $SCRIPT_URL | sudo bash -s -- --uninstall${NC}"
-    echo ""
-}
-
-# --- 主程序 ---
-main() {
-    check_root
-    parse_args "$@"
-    
-    if [ "$UNINSTALL_MODE" = true ]; then
-        uninstall_prism
-    fi
-
-    detect_system
-    download_binary
-    configure_service
-    start_service
-    analyze_mode_and_prompt
-}
-
-main "$@"
+# --- 9. 验证状态 ---
+sleep 2
+if systemctl is-active --quiet prism-agent; then
+    info "✅ Prism Agent 安装并启动成功！"
+    info "查看日志命令: journalctl -u prism-agent -f"
+else
+    error "❌ 服务启动失败，请检查日志: systemctl status prism-agent"
+fi
