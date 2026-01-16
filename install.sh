@@ -14,7 +14,7 @@ BINARY_NAME="prism-agent"
 INSTALL_DIR="/usr/local/bin"
 SERVICE_NAME="prism-agent"
 SCRIPT_URL="https://raw.githubusercontent.com/mslxi/Prism-Gateway/refs/heads/main/install.sh"
-
+CUSTOM_IP=""
 # --- 颜色定义 ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,9 +49,10 @@ parse_args() {
             --master) MASTER_ADDR="$2"; shift 2 ;;
             --secret) SECRET_TOKEN="$2"; shift 2 ;;
             --name)   SERVICE_NAME="$2"; shift 2 ;;
+            --ip)     CUSTOM_IP="$2"; shift 2 ;;
             --uninstall) UNINSTALL_MODE=true; shift ;;
             --beta)   BETA_MODE=true; shift ;;
-            --smart)  SMART_MODE=true; shift ;; # 🟢 新增 Smart 参数
+            --smart)  SMART_MODE=true; shift ;;
             *) shift ;;
         esac
     done
@@ -164,8 +165,14 @@ configure_service() {
 
     # 🟢 动态构建启动参数
     EXEC_ARGS="--master \"$MASTER_ADDR\" --secret \"$SECRET_TOKEN\""
+    
     if [ "$SMART_MODE" = true ]; then
         EXEC_ARGS="$EXEC_ARGS --smart"
+    fi
+
+    # 🟢 如果有自定义 IP，追加参数
+    if [ -n "$CUSTOM_IP" ]; then
+        EXEC_ARGS="$EXEC_ARGS --ip \"$CUSTOM_IP\""
     fi
 
     cat > "$SERVICE_FILE" <<EOF
@@ -188,7 +195,6 @@ EOF
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
 }
-
 # 7. 启动与检测
 start_service() {
     step "启动服务..."
