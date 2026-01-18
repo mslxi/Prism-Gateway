@@ -44,16 +44,57 @@ parse_args() {
     BETA_MODE=false
     SMART_MODE=false
 
+    # 循环解析参数，直到所有参数处理完毕
     while [[ $# -gt 0 ]]; do
-        case $1 in
-            --master) MASTER_ADDR="$2"; shift 2 ;;
-            --secret) SECRET_TOKEN="$2"; shift 2 ;;
-            --name)   SERVICE_NAME="$2"; shift 2 ;;
-            --ip)     CUSTOM_IP="$2"; shift 2 ;;
-            --uninstall) UNINSTALL_MODE=true; shift ;;
-            --beta)   BETA_MODE=true; shift ;;
-            --smart)  SMART_MODE=true; shift ;;
-            *) shift ;;
+        case "$1" in
+            --master)
+                if [ -n "$2" ] && [ "${2:0:2}" != "--" ]; then
+                    MASTER_ADDR="$2"
+                    shift 2
+                else
+                    error "--master 参数需提供值"
+                fi
+                ;;
+            --secret)
+                if [ -n "$2" ] && [ "${2:0:2}" != "--" ]; then
+                    SECRET_TOKEN="$2"
+                    shift 2
+                else
+                    error "--secret 参数需提供值"
+                fi
+                ;;
+            --name)
+                if [ -n "$2" ] && [ "${2:0:2}" != "--" ]; then
+                    SERVICE_NAME="$2"
+                    shift 2
+                else
+                    shift 1 # --name 为可选，如果没有值则忽略（但这不常见，通常应报错）
+                fi
+                ;;
+            --ip)
+                if [ -n "$2" ] && [ "${2:0:2}" != "--" ]; then
+                    CUSTOM_IP="$2"
+                    shift 2
+                else
+                    shift 1
+                fi
+                ;;
+            --uninstall)
+                UNINSTALL_MODE=true
+                shift
+                ;;
+            --beta)
+                BETA_MODE=true
+                shift
+                ;;
+            --smart)
+                SMART_MODE=true
+                shift
+                ;;
+            *)
+                # 未知参数，跳过
+                shift
+                ;;
         esac
     done
 
@@ -237,7 +278,7 @@ analyze_mode_and_prompt() {
     fi
     
     echo ""
-    echo -e "🗑️  卸载命令: ${GREEN}curl -sL $SCRIPT_URL | sudo bash -s -- --uninstall${NC}"
+    echo -e "🗑️  卸载命令: ${GREEN}curl -sL $SCRIPT_URL | bash -s -- --uninstall${NC}"
     echo ""
 }
 
