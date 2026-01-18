@@ -122,21 +122,25 @@ download_binary() {
     # 获取版本信息
     RESP=$(curl -s --connect-timeout 5 "$API_URL")
 
-    # 解析 Tag 和 下载链接
-    VERSION=$(echo "$RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
-    DOWNLOAD_URL=$(echo "$RESP" | grep "browser_download_url" | grep "$ASSET_NAME" | head -n 1 | cut -d '"' -f 4)
+    # 解析 Tag
+    if [ "$BETA_MODE" = true ]; then
+        # Beta 模式：优先查找包含 "beta" 的 Tag
+        VERSION=$(echo "$RESP" | grep '"tag_name":' | grep -i "beta" | head -n 1 | cut -d '"' -f 4)
+        if [ -z "$VERSION" ]; then
+            warn "未找到 Beta 版本，尝试获取最新版本..."
+            VERSION=$(echo "$RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+        fi
+    else
+        # 默认模式：直接获取第一个 Tag (Latest Stable)
+        VERSION=$(echo "$RESP" | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+    fi
 
     if [ -n "$VERSION" ]; then
         info "发现版本: ${CYAN}${VERSION}${NC}"
+        # 构造下载链接
+        DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$ASSET_NAME"
     else
         warn "无法通过 API 获取版本信息，尝试使用通用链接..."
-    fi
-
-    # 回退策略
-    if [ -z "$DOWNLOAD_URL" ]; then
-        if [ "$BETA_MODE" = true ]; then
-            warn "Beta 版本获取失败，回退到最新稳定版 (Latest Stable)..."
-        fi
         DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/$ASSET_NAME"
     fi
 
